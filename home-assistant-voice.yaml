@@ -1,17 +1,4 @@
 substitutions:
-  #pinout
-  pin_mic_sd: "GPIO15"
-  pin_mic_ws: "GPIO14"
-  pin_mic_sck: "GPIO13"
-  pin_speaker_din: "GPIO10"
-  pin_speaker_lrc: "GPIO7"
-  pin_speaker_bclk: "GPIO8"
-  pin_led_di: "GPIO21"
-  #VCC 5V -> speaker and LED
-  #VCC 3.3V -> mic
-  #GND all GND +L/R in mic
-
-
   # Phases of the Voice Assistant
   # The voice assistant is ready to be triggered by a wake word
   voice_assist_idle_phase_id: '1'
@@ -27,25 +14,23 @@ substitutions:
   voice_assist_not_ready_phase_id: '10'
   # The voice assistant encountered an error
   voice_assist_error_phase_id: '11'
-  # Change this to true in case you ahve a hidden SSID at home.
-  hidden_ssid: "false"
 
 esphome:
   name: home-assistant-voice
-  friendly_name: Home Assistant Voice Sypialnia
+  friendly_name: Home Assistant Voice
   name_add_mac_suffix: true
-  min_version: 2025.2.0
+  min_version: 2025.5.1
   on_boot:
     priority: 375
     then:
       # Run the script to refresh the LED status
       - script.execute: control_leds
       - delay: 1s
+      - switch.turn_on: internal_speaker_amp
       - script.execute:
           id: play_sound
           priority: true
           sound_file: !lambda return id(wake_word_triggered_sound);
-
       # If after 10 minutes, the device is still initializing (It did not yet connect to Home Assistant), turn off the init_in_progress variable and run the script to refresh the LED status
       - delay: 10min
       - if:
@@ -57,16 +42,25 @@ esphome:
 
 esp32:
   board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
   variant: esp32s3
   flash_size: 16MB
   framework:
     type: esp-idf
     version: recommended
     sdkconfig_options:
-      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
       CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      # Moves instructions and read only data from flash into PSRAM on boot.
+      # Both enabled allows instructions to execute while a flash operation is in progress without needing to be placed in IRAM.
+      # Considerably speeds up mWW at the cost of using more PSRAM.
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
 
       CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
       CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
@@ -75,17 +69,19 @@ wifi:
   id: wifi_id
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  # output_power: 8.5
+  output_power: 15
   manual_ip:
-    static_ip: "192.168.88.56"
-    gateway: "192.168.88.1"
+    static_ip: "192.168.x.x"
+    gateway: "192.168.x.x"
     subnet: "255.255.255.0"
-  fast_connect: ${hidden_ssid}
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
     - script.execute: control_leds
   on_disconnect:
     - script.execute: control_leds
+
+network:
+  enable_ipv6: true
 
 logger:
   level: DEBUG
@@ -148,25 +144,6 @@ globals:
     initial_value: 'false'
 
 switch:
-  # This is the master mute switch. It is exposed to Home Assistant. The user can only turn it on and off if the hardware switch is off. (The hardware switch overrides the software one)
-  - platform: template
-    id: master_mute_switch
-    restore_mode: RESTORE_DEFAULT_OFF
-    icon: "mdi:microphone-off"
-    name: Mute
-    entity_category: config
-    turn_on_action:
-      - switch.template.publish:
-                id: master_mute_switch
-                state: ON
-    turn_off_action:
-      - switch.template.publish:
-                id: master_mute_switch
-                state: OFF
-    on_turn_on:
-      - script.execute: control_leds
-    on_turn_off:
-      - script.execute: control_leds
   # Wake Word Sound Switch.
   - platform: template
     id: wake_sound
@@ -182,6 +159,8 @@ switch:
     internal: true
     restore_mode: ALWAYS_OFF
     on_turn_off:
+      # Disable stop wake word
+      - micro_wake_word.disable_model: stop
       - script.execute: disable_repeat
       # Stop any current annoucement (ie: stop the timer ring mid playback)
       - if:
@@ -203,19 +182,28 @@ switch:
           id: media_mixing_input
           decibel_reduction: 20
           duration: 0.0s
+      # Enable stop wake word
+      - micro_wake_word.enable_model: stop
       # Ring timer
       - script.execute: ring_timer
       # Refresh LED
       - script.execute: control_leds
       # If 15 minutes have passed and the timer is still ringing, stop it.
-      - delay: 10sec
+      - delay: 15min
       - switch.turn_off: timer_ringing
+  - platform: gpio
+    pin: GPIO47
+    id: internal_speaker_amp
+    name: "Internal speaker amp"
+    entity_category: config
+    restore_mode: ALWAYS_OFF
+    internal: true
 
 light:
   # Hardware LED ring. Not used because remapping needed
   - platform: esp32_rmt_led_strip
     id: leds_internal
-    pin: "${pin_led_di}"
+    pin: GPIO21
     chipset: WS2812
     max_refresh_rate: 15ms
     num_leds: 12
@@ -244,7 +232,7 @@ light:
             auto light_color = id(led_ring).current_values;
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i == id(global_led_animation_index) % 12) {
                 it[i] = color;
               } else if (i == (id(global_led_animation_index) + 11) % 12) {
@@ -269,7 +257,7 @@ light:
             auto light_color = id(led_ring).current_values;
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i == id(global_led_animation_index) % 12) {
                 it[i] = color;
               } else if (i == (id(global_led_animation_index) + 11) % 12) {
@@ -301,7 +289,7 @@ light:
             auto light_color = id(led_ring).current_values;
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i == id(global_led_animation_index) % 12) {
                 it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
               } else if (i == (id(global_led_animation_index) + 6) % 12) {
@@ -326,7 +314,7 @@ light:
             auto light_color = id(led_ring).current_values;
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i == (id(global_led_animation_index)) % 12) {
                 it[i] = color;
               } else if (i == ( id(global_led_animation_index) + 1) % 12) {
@@ -352,25 +340,30 @@ light:
             auto light_color = id(led_ring).current_values;
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if ( light_color.get_state() ) {
                 it[i] = color;
               } else {
                 it[i] = Color::BLACK;
               }
             }
-            if ( id(master_mute_switch).state ) {
-              it[2] = Color::BLACK;
-              it[3] = muted_color;
-              it[4] = Color::BLACK;
-              it[8] = Color::BLACK;
-              it[9] = muted_color;
-              it[10] = Color::BLACK;
-            }
             if ( id(external_media_player).volume == 0.0f || id(external_media_player).is_muted() ) {
               it[5] = Color::BLACK;
               it[6] = muted_color;
               it[7] = Color::BLACK;
+            }
+      - addressable_lambda:
+          name: "Voice kit startup failed"
+          # update_interval: 16ms
+          lambda: |-
+            static int8_t index = 0;
+            Color fail_color(255, 0, 0);
+            for (uint8_t i = 0; i < 12; i++) {
+              if (i % 3) {
+                it[i] = Color::BLACK;
+              } else {
+                it[i] = fail_color;
+              }
             }
       - addressable_lambda:
           name: "Volume Display"
@@ -381,7 +374,7 @@ light:
                   light_color.get_blue() * 255);
             Color silenced_color(255, 0, 0);
             auto volume_ratio = 12.0f * id(external_media_player).volume;
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i <= volume_ratio) {
                 it[(6+i)%12] = color * min( 255.0f * (volume_ratio - i) , 255.0f ) ;
               } else {
@@ -406,7 +399,7 @@ light:
               brightness_decreasing = true;
             }
             Color error_color(255, 0, 0);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               it[i] = error_color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
             }
             if (brightness_decreasing) {
@@ -432,12 +425,8 @@ light:
             Color color(light_color.get_red() * 255, light_color.get_green() * 255,
                   light_color.get_blue() * 255);
             Color muted_color(255, 0, 0);
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
-            }
-            if ( id(master_mute_switch).state ) {
-              it[3] = muted_color;
-              it[9] = muted_color;
             }
             if (brightness_decreasing) {
               brightness_step++;
@@ -457,21 +446,13 @@ light:
             Color muted_color(255, 0, 0);
             auto timer_ratio = 12.0f * id(first_active_timer).seconds_left / max(id(first_active_timer).total_seconds , static_cast<uint32_t>(1));
             uint8_t last_led_on = static_cast<uint8_t>(ceil(timer_ratio)) - 1;
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               float brightness_dip = ( i == id(global_led_animation_index) % 12 && i != last_led_on ) ? 0.9f : 1.0f ;
               if (i <= timer_ratio) {
                 it[i] = color * min(255.0f * brightness_dip * (timer_ratio - i) , 255.0f * brightness_dip) ;
               } else {
                 it[i] = Color::BLACK;
               }
-            }
-            if (id(master_mute_switch).state) {
-              it[2] = Color::BLACK;
-              it[3] = muted_color;
-              it[4] = Color::BLACK;
-              it[8] = Color::BLACK;
-              it[9] = muted_color;
-              it[10] = Color::BLACK;
             }
             id(global_led_animation_index) = (12 + id(global_led_animation_index) - 1) % 12;
       - addressable_rainbow:
@@ -486,7 +467,7 @@ light:
             if (initial_run) {
               index = 0;
             }
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i <= index ) {
                 it[i] = Color::BLACK;
               } else {
@@ -503,7 +484,7 @@ light:
             if (initial_run) {
               index = 0;
             }
-            for (int i = 0; i < 12; i++) {
+            for (uint8_t i = 0; i < 12; i++) {
               if (i <= index ) {
                 it[i] = color;
               } else {
@@ -534,6 +515,7 @@ light:
       - id: leds_internal
         from: 0
         to: 6
+
 
 script:
   # Master script controlling the LEDs, based on different conditions : initialization in progress, wifi and api connected and voice assistant phase.
@@ -568,13 +550,13 @@ script:
             id(control_leds_voice_assistant_not_ready_phase).execute();
           } else if (id(is_timer_active)) {
             id(control_leds_timer_ticking).execute();
-          } else if (id(master_mute_switch).state) {
-            id(control_leds_muted_or_silent).execute();
           } else if (id(external_media_player).volume == 0.0f || id(external_media_player).is_muted()) {
             id(control_leds_muted_or_silent).execute();
           } else if (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}) {
             id(control_leds_voice_assistant_idle_phase).execute();
           }
+
+  # Script executed if voice_kit startup failed
 
   # Script executed during Improv BLE
   # Warm White Twinkle
@@ -703,15 +685,6 @@ script:
           id: voice_assistant_leds
           effect: "Twinkle"
 
-  # Script executed when the dial is touched
-  # A number of LEDs turn on indicating a visual representation of the volume of the media player entity.
-  - id: control_leds_dial_touched
-    then:
-      - light.turn_on:
-          brightness: !lambda return max( id(led_ring).current_values.get_brightness() , 0.2f );
-          id: voice_assistant_leds
-          effect: "Volume Display"
-
   # Script executed when the timer is ringing, to control the LEDs
   # The LED ring blinks.
   - id: control_leds_timer_ringing
@@ -729,7 +702,7 @@ script:
           brightness: !lambda return max( id(led_ring).current_values.get_brightness() , 0.2f );
           id: voice_assistant_leds
           effect: "Timer tick"
-
+  
   # Script executed when the timer is ringing, to playback sounds.
   - id: ring_timer
     then:
@@ -814,25 +787,44 @@ script:
   # Why is this wrapped on a script?
   #   Becasue we want to stop the sequence if the TTS step is faster than that.
   #   This allows us to prevent having the deactivation of the stop word before its own activation.
+  - id: activate_stop_word_once
+    then:
+      - delay: 1s
+      # Enable stop wake word
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.enable_model: stop
+            - wait_until:
+                not:
+                  media_player.is_announcing:
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
 
 i2s_audio:
   - id: i2s_output
+    # i2s_output data pin is gpio10
     i2s_lrclk_pin:
-      number: "${pin_speaker_lrc}"
+      number: GPIO7
     i2s_bclk_pin:
-      number: "${pin_speaker_bclk}"
+      number: GPIO8
 
   - id: i2s_input
+    # data line is GPIO15
     i2s_lrclk_pin:
-      number: "${pin_mic_ws}"
+      number: GPIO14
     i2s_bclk_pin:
-      number: "${pin_mic_sck}"
+      number: GPIO13
 
 microphone:
   - platform: i2s_audio
-    id: asr_mic
+    id: i2s_mics
     adc_type: external
-    i2s_din_pin: "${pin_mic_sd}"
+    i2s_din_pin: GPIO15
     channel: left
     i2s_audio_id: i2s_input
 
@@ -842,14 +834,13 @@ speaker:
     id: i2s_audio_speaker
     sample_rate: 48000
     i2s_mode: primary
-    i2s_dout_pin: "${pin_speaker_din}"
+    i2s_dout_pin: GPIO10
     bits_per_sample: 32bit
     i2s_audio_id: i2s_output
     dac_type: external
     channel: stereo
     timeout: never
     buffer_duration: 100ms
-    # audio_dac: aic3204_dac
 
   # Virtual speakers to combine the announcement and media streams together into one output
   - platform: mixer
@@ -877,7 +868,7 @@ speaker:
 media_player:
   - platform: speaker
     id: external_media_player
-    name: None
+    name: Media Player
     internal: False
     volume_increment: 0.05
     volume_min: 0.4
@@ -918,54 +909,112 @@ media_player:
               decibel_reduction: 0
               duration: 1.0s
     files:
+      - id: factory_reset_initiated_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_initiated.mp3
+      - id: factory_reset_cancelled_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_cancelled.mp3
+      - id: factory_reset_confirmed_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/factory_reset_confirmed.mp3
       - id: timer_finished_sound
         file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
       - id: wake_word_triggered_sound
         file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+      - id: easter_egg_tick_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/easter_egg_tick.mp3
+      - id: easter_egg_tada_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/easter_egg_tada.mp3
+      - id: error_cloud_expired
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/error_cloud_expired.mp3
+
 
 micro_wake_word:
   id: mww
+  microphone: i2s_mics
+  stop_after_detection: false
   models:
     - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+      id: okay_nabu
+    - model: hey_jarvis
+      id: hey_jarvis
+    - model: hey_mycroft
+      id: hey_mycroft
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
   vad:
-  microphone: asr_mic
   on_wake_word_detected:
     # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
-    - if:
-        condition:
-          switch.is_off: master_mute_switch
-        then:
           # If a timer is ringing: Stop it, do not start the voice assistant (We can stop timer from voice!)
           - if:
               condition:
                 switch.is_on: timer_ringing
               then:
                 - switch.turn_off: timer_ringing
-              # Start voice assistant, stop current announcement.
+              # Stop voice assistant if running
               else:
                 - if:
                     condition:
-                      media_player.is_announcing:
+                      voice_assistant.is_running:
                     then:
-                      media_player.stop:
-                        announcement: true
+                      voice_assistant.stop:
+                    # Stop any other media player announcement
                     else:
                       - if:
                           condition:
-                            switch.is_on: wake_sound
+                            media_player.is_announcing:
                           then:
-                            - script.execute:
-                                id: play_sound
-                                priority: true
-                                sound_file: !lambda return id(wake_word_triggered_sound);
-                            - delay: 300ms
-                      - voice_assistant.start:
-                          wake_word: !lambda return wake_word;
+                            - media_player.stop:
+                                announcement: true
+                          # Start the voice assistant and play the wake sound, if enabled
+                          else:
+                            - if:
+                                condition:
+                                  switch.is_on: wake_sound
+                                then:
+                                  - script.execute:
+                                      id: play_sound
+                                      priority: true
+                                      sound_file: !lambda return id(wake_word_triggered_sound);
+                                  - delay: 300ms
+                            - voice_assistant.start:
+                                wake_word: !lambda return wake_word;
+
+select:
+  - platform: template
+    name: "Wake word sensitivity"
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      # Sets specific wake word probabilities computed for each particular model
+      # Note probability cutoffs are set as a quantized uint8 value, each comment has the corresponding floating point cutoff
+      # False Accepts per Hour values are tested against all units and channels from the Dinner Party Corpus.
+      # These cutoffs apply only to the specific models included in the firmware: okay_nabu@20241226.3, hey_jarvis@v2, hey_mycroft@v2
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu).set_probability_cutoff(217);    // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis).set_probability_cutoff(247);   // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+          id(hey_mycroft).set_probability_cutoff(253);  // 0.99 -> 0.567 FAPH on DipCo
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu).set_probability_cutoff(176);    // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(235);   // 0.92 -> 0.939 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(242);  // 0.95 -> 1.502 FAPH on DipCo (Manifest's default)
+        } else if (x == "Very sensitive") {
+          id(okay_nabu).set_probability_cutoff(143);    // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_jarvis).set_probability_cutoff(212);   // 0.83 -> 1.502 FAPH on DipCo
+          id(hey_mycroft).set_probability_cutoff(237);  // 0.93 -> 1.878 FAPH on DipCo
+        }
 
 voice_assistant:
   id: va
-  microphone: asr_mic
+  microphone: i2s_mics
   media_player: external_media_player
+  micro_wake_word: mww
   use_wake_word: false
   noise_suppression_level: 0
   auto_gain: 0 dbfs
@@ -980,6 +1029,8 @@ voice_assistant:
     - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
     - script.execute: control_leds
   on_error:
+    # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
+    # These two are ignored for a better user experience
     - if:
         condition:
           and:
@@ -989,6 +1040,15 @@ voice_assistant:
         then:
           - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
           - script.execute: control_leds
+    # If the error code is cloud-auth-failed, serve a local audio file guiding the user.
+    - if:
+        condition:
+          - lambda: return code == "cloud-auth-failed";
+        then:
+          - script.execute:
+              id: play_sound
+              priority: true
+              sound_file: !lambda return id(error_cloud_expired);
   # When the voice assistant starts: Play a wake up sound, duck audio.
   on_start:
     - mixer_speaker.apply_ducking:
@@ -1004,12 +1064,28 @@ voice_assistant:
   on_stt_vad_end:
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
     - script.execute: control_leds
+  on_intent_progress:
+    - if:
+        condition:
+          # A nonempty x variable means a streaming TTS url was sent to the media player
+          lambda: 'return !x.empty();'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          # Start a script that would potentially enable the stop word if the response is longer than a second
+          - script.execute: activate_stop_word_once
   on_tts_start:
-    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
-    - script.execute: control_leds
+    - if:
+        condition:
+          # The intent_progress trigger didn't start the TTS Reponse
+          lambda: 'return id(voice_assistant_phase) != ${voice_assist_replying_phase_id};'
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+          - script.execute: control_leds
+          # Start a script that would potentially enable the stop word if the response is longer than a second
+          - script.execute: activate_stop_word_once
   # When the voice assistant ends ...
   on_end:
-    - micro_wake_word.start:
     - wait_until:
         not:
           voice_assistant.is_running:
