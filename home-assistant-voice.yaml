@@ -19,6 +19,15 @@ substitutions:
   wifi_gateway: "192.168.x.x"
   wifi_subnet: "255.255.255.0"
   fallback_ap_ssid: "HomeAssistantVoiceSetup"
+  # Pin configuration
+  pin_internal_speaker_amp: "GPIO47"
+  pin_led_di: "GPIO21"
+  pin_i2s_output_lrclk: "GPIO7"
+  pin_i2s_output_bclk: "GPIO8"
+  pin_i2s_input_din: "GPIO15"
+  pin_i2s_input_lrclk: "GPIO14"
+  pin_i2s_input_bclk: "GPIO13"
+  pin_i2s_output_dout: "GPIO10"
 
 esphome:
   name: home-assistant-voice
@@ -200,7 +209,7 @@ switch:
       - delay: 15min
       - switch.turn_off: timer_ringing
   - platform: gpio
-    pin: GPIO47
+    pin: ${pin_internal_speaker_amp}
     id: internal_speaker_amp
     name: "Internal speaker amp"
     entity_category: config
@@ -211,7 +220,7 @@ light:
   # Hardware LED ring. Not used because remapping needed
   - platform: esp32_rmt_led_strip
     id: leds_internal
-    pin: GPIO21
+    pin: ${pin_led_di}
     chipset: WS2812
     max_refresh_rate: 15ms
     num_leds: 12
@@ -817,22 +826,22 @@ i2s_audio:
   - id: i2s_output
     # i2s_output data pin is gpio10
     i2s_lrclk_pin:
-      number: GPIO7
+      number: ${pin_i2s_output_lrclk}
     i2s_bclk_pin:
-      number: GPIO8
+      number: ${pin_i2s_output_bclk}
 
   - id: i2s_input
     # data line is GPIO15
     i2s_lrclk_pin:
-      number: GPIO14
+      number: ${pin_i2s_input_lrclk}
     i2s_bclk_pin:
-      number: GPIO13
+      number: ${pin_i2s_input_bclk}
 
 microphone:
   - platform: i2s_audio
     id: i2s_mics
     adc_type: external
-    i2s_din_pin: GPIO15
+    i2s_din_pin: ${pin_i2s_input_din}
     channel: left
     i2s_audio_id: i2s_input
 
@@ -842,7 +851,7 @@ speaker:
     id: i2s_audio_speaker
     sample_rate: 48000
     i2s_mode: primary
-    i2s_dout_pin: GPIO10
+    i2s_dout_pin: ${pin_i2s_output_dout}
     bits_per_sample: 32bit
     i2s_audio_id: i2s_output
     dac_type: external
