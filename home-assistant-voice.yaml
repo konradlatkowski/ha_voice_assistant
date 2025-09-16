@@ -14,6 +14,11 @@ substitutions:
   voice_assist_not_ready_phase_id: '10'
   # The voice assistant encountered an error
   voice_assist_error_phase_id: '11'
+  # Network configuration
+  wifi_static_ip: "192.168.x.x"
+  wifi_gateway: "192.168.x.x"
+  wifi_subnet: "255.255.255.0"
+  fallback_ap_ssid: "HomeAssistantVoiceSetup"
 
 esphome:
   name: home-assistant-voice
@@ -71,9 +76,12 @@ wifi:
   password: !secret wifi_password
   output_power: 15
   manual_ip:
-    static_ip: "192.168.x.x"
-    gateway: "192.168.x.x"
-    subnet: "255.255.255.0"
+    static_ip: ${wifi_static_ip}
+    gateway: ${wifi_gateway}
+    subnet: ${wifi_subnet}
+  ap:
+    ssid: ${fallback_ap_ssid}
+    password: !secret fallback_ap_password
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
     - script.execute: control_leds
